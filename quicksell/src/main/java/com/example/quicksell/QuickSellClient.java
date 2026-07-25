@@ -63,7 +63,7 @@ public class QuickSellClient implements ClientModInitializer {
     private static final KeyBinding.Category CATEGORY = KeyBinding.Category.create(Identifier.of(MOD_ID, "main"));
 
     private static final int REQUIRED_XP_LEVEL = 33;
-    private static final int BLOCK_SEARCH_RADIUS = 24; // (2*24+1)^2 * 9 = ~21609 blok tariyor
+    private static final int BLOCK_SEARCH_RADIUS = 100; // yatay 100 blok
     private static final double ARRIVE_DISTANCE = 2.3;
     // Vanilla ekranlarda oyuncu envanteri hep sabit slotlardan baslar:
     private static final int ENCHANT_PLAYER_INV_OFFSET = 2;   // 0=esya,1=lapis, 2'den itibaren envanter
@@ -516,7 +516,7 @@ public class QuickSellClient implements ClientModInitializer {
         BlockPos center = player.getBlockPos();
         BlockPos nearest = null;
         double nearestDistSq = Double.MAX_VALUE;
-        for (BlockPos pos : BlockPos.iterate(center.add(-radius, -4, -radius), center.add(radius, 4, radius))) {
+        for (BlockPos pos : BlockPos.iterate(center.add(-radius, -10, -radius), center.add(radius, 10, radius))) {
             if (world.getBlockState(pos).isOf(block)) {
                 double ddx = pos.getX() + 0.5 - player.getX();
                 double ddy = pos.getY() + 0.5 - player.getY();
