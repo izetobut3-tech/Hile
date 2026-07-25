@@ -33,12 +33,20 @@ import net.minecraft.util.math.Vec3d;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
+import net.minecraft.block.BlockState;
+import net.minecraft.fluid.FluidState;
+import net.minecraft.world.World;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.PriorityQueue;
 
 /**
  * QuickSellClient - artik "satis" yapmiyor.
  *
- * Yeni gorev:
+ * Gorev:
  *  1) Etraftaki (config'de belirtilen) esyalari ve yerdeki XP toplarini topla.
  *     Ayni 100 blokluk menzil icinde spawner (mob kafesi) varsa, XP topu ile
  *     spawner'dan hangisi daha yakinsa ona gidilir. Spawner'a varilinca
@@ -56,6 +64,14 @@ import java.util.List;
  *     (grindstone) goturur, buyuyu soker, tekrar buyu masasina doner.
  *     XP yetmezse toplamaya geri doner.
  *  5) 4 parca da Koruma IV olunca normal toplamaya devam eder.
+ *
+ * ROTA SISTEMI: Tum hareketler (spawner, xp toplari, buyu masasi, bileme
+ * tasi) artik PathFinder ile hesaplanan blok-tabanli guvenli rota uzerinden
+ * yapiliyor (bkz. advanceTowardsBlock). Cikintili bloklara/tumsek-cukurlara
+ * takilmadan karadan gider; su (ve lav) tamamen bir engel sayilir, yani
+ * suya hic dusmeden/girmeden karadan dolanarak gider. Rota
+ * bulunamazsa (cok karmasik yapi vb.) eski duz-cizgi yontemine
+ * (moveTowardsPosition) otomatik olarak dusuluyor.
  *
  * UYARI: EnchantmentScreenHandler'daki 3 secenegin (enchantmentPower /
  * enchantmentId / enchantmentLevel) tam alan adlari ve ItemEnchantmentsComponent
@@ -83,6 +99,16 @@ public class QuickSellClient implements ClientModInitializer {
     // Vanilla ekranlarda oyuncu envanteri hep sabit slotlardan baslar:
     private static final int ENCHANT_PLAYER_INV_OFFSET = 2;   // 0=esya,1=lapis, 2'den itibaren envanter
     private static final int GRINDSTONE_PLAYER_INV_OFFSET = 3; // 0,1=girdi,2=cikti, 3'ten itibaren envanter
+
+    // ---- Rota (pathfinding) ayarlari ----
+    // NOT: Arama alani 100 bloga cikarildigi icin bu limit de yukseltildi.
+    // Cok uzak/karmasik hedeflerde tek seferlik rota hesaplamasi birkac
+    // tick suren kucuk bir donma (hitch) yapabilir; oyun akiciligi bozulursa
+    // bu degeri (ve PATH_SEARCH_PADDING'i) dusurmek yeterli.
+    private static final int PATH_MAX_EXPANSIONS = 20000;   // performans siniri
+    private static final int PATH_RECOMPUTE_TICKS = 20;    // ~1 saniyede bir rota tazelenir
+    private static final double WAYPOINT_ARRIVE_DIST = 0.6;
+    private static final int PATH_STUCK_LIMIT = 30;        // bu kadar tick engelliyse rota yeniden hesaplanir
 
     private static KeyBinding loopToggleKey; // G: dongu baslat/durdur
     private static KeyBinding stopKey;       // H: her ne olursa olsun hemen durdur
@@ -122,6 +148,12 @@ public class QuickSellClient implements ClientModInitializer {
     private boolean spawnerReached = false;
     private int spawnerStuckTicks = 0;
 
+    // ---- Rota (pathfinding) durumu ----
+    private final LinkedList<BlockPos> currentPath = new LinkedList<>();
+    private BlockPos pathGoalBlock = null;
+    private int pathRecomputeCooldown = 0;
+    private int pathStuckTicks = 0;
+
     @Override
     public void onInitializeClient() {
         QuickSellConfig.load();
@@ -157,6 +189,7 @@ public class QuickSellClient implements ClientModInitializer {
                 lastHealth = player.getHealth();
                 stuckTicks = 0;
                 unstuckTicks = 0;
+                clearPath();
                 resumeSpawnerHunt(); // dongu basladiginda hemen 100 blok taranip spawnera gidilsin
                 state = State.COLLECTING;
                 player.sendMessage(Text.literal("[QuickSell] Dongu BASLADI: topla -> xp 33'te buyule -> P4 olana kadar devam")
@@ -211,6 +244,7 @@ public class QuickSellClient implements ClientModInitializer {
                 cachedTargetBlock = findNearestBlock(client, player, net.minecraft.block.Blocks.ENCHANTING_TABLE, BLOCK_SEARCH_RADIUS);
                 if (cachedTargetBlock != null) {
                     resetMovementKeys(client);
+                    clearPath();
                     subStep = 0;
                     tickCounter = 0;
                     state = State.GOTO_ENCHANT_TABLE;
@@ -258,7 +292,7 @@ public class QuickSellClient implements ClientModInitializer {
                     && world.getBlockState(targetGroundCheck.down()).isAir()) {
                 return;
             }
-            moveTowardsPosition(client, player, orbX, orbZ, 0.6);
+            advanceTowardsBlock(client, player, BlockPos.ofFloored(orbX, orbY, orbZ), 0.6);
             return;
         }
 
@@ -292,11 +326,9 @@ public class QuickSellClient implements ClientModInitializer {
                     && world.getBlockState(targetGroundCheck.down()).isAir()) {
                 return;
             }
-            moveTowardsPosition(client, player, orbX, orbZ, 0.6);
+            advanceTowardsBlock(client, player, BlockPos.ofFloored(orbX, orbY, orbZ), 0.6);
         } else {
-            double sx = cachedSpawnerBlock.getX() + 0.5;
-            double sz = cachedSpawnerBlock.getZ() + 0.5;
-            boolean arrivedAtSpawner = moveTowardsPosition(client, player, sx, sz, SPAWNER_ARRIVE_DISTANCE);
+            boolean arrivedAtSpawner = advanceTowardsBlock(client, player, cachedSpawnerBlock, SPAWNER_ARRIVE_DISTANCE);
             if (arrivedAtSpawner) {
                 spawnerReached = true;
                 spawnerStuckTicks = 0;
@@ -355,15 +387,14 @@ public class QuickSellClient implements ClientModInitializer {
                 player.sendMessage(Text.literal("[QuickSell] Hedef blok bulunamadi, toplamaya donuluyor.")
                         .formatted(Formatting.YELLOW), false);
                 resetMovementKeys(client);
+                clearPath();
                 resumeSpawnerHunt();
                 state = State.COLLECTING;
                 return;
             }
         }
 
-        double cx = cachedTargetBlock.getX() + 0.5;
-        double cz = cachedTargetBlock.getZ() + 0.5;
-        boolean arrived = moveTowardsPosition(client, player, cx, cz, ARRIVE_DISTANCE);
+        boolean arrived = advanceTowardsBlock(client, player, cachedTargetBlock, ARRIVE_DISTANCE);
         if (arrived) {
             resetMovementKeys(client);
             BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(cachedTargetBlock), Direction.UP, cachedTargetBlock, false);
@@ -460,6 +491,7 @@ public class QuickSellClient implements ClientModInitializer {
                     } else {
                         player.sendMessage(Text.literal("[QuickSell] P4 gelmedi, bileme tasina gidiliyor.")
                                 .formatted(Formatting.GOLD), false);
+                        clearPath();
                         state = State.GOTO_GRINDSTONE;
                     }
                 }
@@ -508,6 +540,7 @@ public class QuickSellClient implements ClientModInitializer {
                     resumeSpawnerHunt();
                     state = State.COLLECTING;
                 } else {
+                    clearPath();
                     state = State.GOTO_ENCHANT_TABLE;
                 }
             }
@@ -516,7 +549,117 @@ public class QuickSellClient implements ClientModInitializer {
     }
 
     // =========================================================
-    // ORTAK HAREKET FONKSIYONU (kafa sabit, govde kayarak gider)
+    // ROTA (PATHFINDING) ILE HAREKET
+    // =========================================================
+
+    /**
+     * Hedef bloga (spawner, xp topu, buyu masasi, bileme tasi) PathFinder ile
+     * hesaplanan guvenli rota uzerinden ilerler. Cikintili bloklara,
+     * tumsek/cukurlara takilmadan, suya (ve lava) hic girmeden karadan gider.
+     *
+     * Rota bulunamazsa (cok karmasik yapi, cok uzak hedef vb.) otomatik olarak
+     * eski duz-cizgi yontemine (moveTowardsPosition) duser.
+     *
+     * @return hedefe (arriveDistance icine) ulasildiysa true.
+     */
+    private boolean advanceTowardsBlock(MinecraftClient client, ClientPlayerEntity player, BlockPos goalBlock, double arriveDistance) {
+        if (goalBlock == null) return false;
+
+        double cdx = (goalBlock.getX() + 0.5) - player.getX();
+        double cdz = (goalBlock.getZ() + 0.5) - player.getZ();
+        if (cdx * cdx + cdz * cdz <= arriveDistance * arriveDistance) {
+            resetMovementKeys(client);
+            clearPath();
+            return true;
+        }
+
+        var world = client.world;
+        BlockPos playerPos = player.getBlockPos();
+
+        boolean goalChanged = pathGoalBlock == null || !pathGoalBlock.equals(goalBlock);
+        boolean needsRecompute = currentPath.isEmpty() || goalChanged || pathRecomputeCooldown <= 0;
+
+        if (needsRecompute && world != null) {
+            pathRecomputeCooldown = PATH_RECOMPUTE_TICKS;
+            pathGoalBlock = goalBlock;
+
+            BlockPos standTarget = PathFinder.findStandableNear(world, goalBlock, playerPos, 2);
+            if (standTarget == null) {
+                standTarget = PathFinder.findStandableNear(world, goalBlock, playerPos, 3);
+            }
+            if (standTarget == null) standTarget = goalBlock;
+
+            List<BlockPos> found = PathFinder.findPath(world, playerPos, standTarget, PATH_MAX_EXPANSIONS);
+            currentPath.clear();
+            currentPath.addAll(found);
+            pathStuckTicks = 0;
+        } else {
+            pathRecomputeCooldown--;
+        }
+
+        if (currentPath.isEmpty()) {
+            // Rota bulunamadi: eski duz-cizgi yontemine dus (guvenlik agi).
+            return moveTowardsPosition(client, player, goalBlock.getX() + 0.5, goalBlock.getZ() + 0.5, arriveDistance);
+        }
+
+        BlockPos waypoint = currentPath.getFirst();
+        double wdx = (waypoint.getX() + 0.5) - player.getX();
+        double wdz = (waypoint.getZ() + 0.5) - player.getZ();
+        double wDistSq = wdx * wdx + wdz * wdz;
+        double wDyAbs = Math.abs(waypoint.getY() - player.getY());
+
+        if (wDistSq <= WAYPOINT_ARRIVE_DIST * WAYPOINT_ARRIVE_DIST && wDyAbs < 1.2) {
+            currentPath.removeFirst();
+            if (currentPath.isEmpty()) {
+                resetMovementKeys(client);
+                return false; // bir sonraki tick genel mesafe kontrolu "vardi" diyecek
+            }
+            waypoint = currentPath.getFirst();
+            wdx = (waypoint.getX() + 0.5) - player.getX();
+            wdz = (waypoint.getZ() + 0.5) - player.getZ();
+        }
+
+        float targetAngle = (float) (MathHelper.atan2(wdz, wdx) * (180.0 / Math.PI)) - 90f;
+        float diff = MathHelper.wrapDegrees(targetAngle - player.getYaw());
+
+        boolean moveBack = Math.abs(diff) > 100f;
+        boolean moveForward = !moveBack;
+        boolean moveRight = diff > 10f;
+        boolean moveLeft = diff < -10f;
+
+        client.options.forwardKey.setPressed(moveForward);
+        client.options.backKey.setPressed(moveBack);
+        client.options.leftKey.setPressed(moveLeft);
+        client.options.rightKey.setPressed(moveRight);
+        client.options.sneakKey.setPressed(false);
+
+        boolean needJump = waypoint.getY() > playerPos.getY();
+        client.options.jumpKey.setPressed(needJump || player.horizontalCollision);
+
+        if (player.horizontalCollision) {
+            pathStuckTicks++;
+            if (pathStuckTicks > PATH_STUCK_LIMIT) {
+                // Rota gecerliligini yitirmis olabilir (yeni yerlesen blok vb.):
+                // zorla yeniden hesapla.
+                clearPath();
+            }
+        } else {
+            pathStuckTicks = 0;
+        }
+
+        return false;
+    }
+
+    private void clearPath() {
+        currentPath.clear();
+        pathGoalBlock = null;
+        pathRecomputeCooldown = 0;
+        pathStuckTicks = 0;
+    }
+
+    // =========================================================
+    // ORTAK HAREKET FONKSIYONU (kafa sabit, govde kayarak gider) - GUVENLIK AGI
+    // Rota bulunamadiginda advanceTowardsBlock tarafindan yedek olarak kullanilir.
     // =========================================================
 
     /** Hedefe ulasildiysa true doner. */
@@ -716,6 +859,7 @@ public class QuickSellClient implements ClientModInitializer {
         loopActive = false;
         state = State.IDLE;
         resetMovementKeys(client);
+        clearPath();
         if (client.player != null) {
             client.player.sendMessage(Text.literal("[QuickSell] " + reason).formatted(Formatting.RED), false);
         }
@@ -724,5 +868,203 @@ public class QuickSellClient implements ClientModInitializer {
     private void resetAll(MinecraftClient client) {
         loopActive = false;
         state = State.IDLE;
+        clearPath();
     }
+
+    // =========================================================
+    // ROTA BULUCU (PathFinder) - tek dosyada kalsin diye buraya tasindi
+    // =========================================================
+    private static final class PathFinder {
+
+        private PathFinder() {
+        }
+
+        private static final int MAX_JUMP_UP = 1;
+        private static final int MAX_FALL_DOWN = 3;
+        // Rota, hedefe (spawner/xp/buyu masasi/bileme tasi - hepsi) gore 100 blok
+        // menzile kadar genis engellerden/duvarlardan dolanabilsin diye ayni
+        // BLOCK_SEARCH_RADIUS ile hizalandi. Genis alan = daha fazla dugum = daha
+        // pahali arama; performans sikinti cikarirsa bu iki sabiti dusurmek yeterli.
+        private static final int PATH_SEARCH_PADDING = 100;
+        private static final int PATH_SEARCH_Y_PADDING = 24;
+
+        private static final int[][] NEIGHBOR_DIRS = {
+                {1, 0}, {-1, 0}, {0, 1}, {0, -1},
+                {1, 1}, {1, -1}, {-1, 1}, {-1, -1}
+        };
+
+        /**
+         * start'tan goal'e A* ile rota hesaplar. Basarili olursa start haric,
+         * goal dahil sirali BlockPos listesi doner. Bulunamazsa bos liste doner.
+         *
+         * @param maxExpansions performans siniri: bu kadar dugum acildiktan sonra
+         *                       hala hedefe ulasilamadiysa aramadan vazgecilir.
+         */
+        public static List<BlockPos> findPath(World world, BlockPos start, BlockPos goal, int maxExpansions) {
+            if (world == null || start == null || goal == null) return List.of();
+
+            Node startNode = new Node(start.toImmutable(), 0.0, heuristic(start, goal), null);
+
+            PriorityQueue<Node> open = new PriorityQueue<>(Comparator.comparingDouble(n -> n.f));
+            Map<BlockPos, Double> bestG = new HashMap<>();
+            open.add(startNode);
+            bestG.put(startNode.pos, 0.0);
+
+            int minX = Math.min(start.getX(), goal.getX()) - PATH_SEARCH_PADDING;
+            int maxX = Math.max(start.getX(), goal.getX()) + PATH_SEARCH_PADDING;
+            int minZ = Math.min(start.getZ(), goal.getZ()) - PATH_SEARCH_PADDING;
+            int maxZ = Math.max(start.getZ(), goal.getZ()) + PATH_SEARCH_PADDING;
+            int minY = Math.min(start.getY(), goal.getY()) - PATH_SEARCH_Y_PADDING;
+            int maxY = Math.max(start.getY(), goal.getY()) + PATH_SEARCH_Y_PADDING;
+
+            Node goalNode = null;
+            int expansions = 0;
+
+            while (!open.isEmpty() && expansions < maxExpansions) {
+                Node current = open.poll();
+                expansions++;
+
+                if (current.pos.getX() == goal.getX() && current.pos.getY() == goal.getY() && current.pos.getZ() == goal.getZ()) {
+                    goalNode = current;
+                    break;
+                }
+
+                for (int[] dir : NEIGHBOR_DIRS) {
+                    int dx = dir[0];
+                    int dz = dir[1];
+                    boolean diagonal = dx != 0 && dz != 0;
+
+                    if (diagonal) {
+                        BlockPos side1 = current.pos.add(dx, 0, 0);
+                        BlockPos side2 = current.pos.add(0, 0, dz);
+                        if (!isOpenColumn(world, side1) || !isOpenColumn(world, side2)) {
+                            continue;
+                        }
+                    }
+
+                    for (int dy = MAX_JUMP_UP; dy >= -MAX_FALL_DOWN; dy--) {
+                        BlockPos cand = current.pos.add(dx, dy, dz);
+                        if (cand.getX() < minX || cand.getX() > maxX || cand.getZ() < minZ || cand.getZ() > maxZ
+                                || cand.getY() < minY || cand.getY() > maxY) {
+                            continue;
+                        }
+
+                        if (!isOpenColumn(world, cand)) continue;
+                        if (isHazard(world, cand) || isHazard(world, cand.up()) || isHazard(world, cand.down())) continue;
+                        if (!hasSupport(world, cand)) continue;
+                        if (dy > 0 && !isPassable(world, current.pos.up().up())) continue; // ziplarken bas cikintiya carpmasin
+
+                        double stepCost = diagonal ? 1.4 : 1.0;
+                        if (dy != 0) stepCost += 0.15 * Math.abs(dy);
+
+                        double newG = current.g + stepCost;
+                        Double existing = bestG.get(cand);
+                        if (existing == null || newG < existing - 1e-6) {
+                            bestG.put(cand, newG);
+                            open.add(new Node(cand, newG, newG + heuristic(cand, goal), current));
+                        }
+                        break; // bu yon icin ilk gecerli yukseklik yeterli
+                    }
+                }
+            }
+
+            if (goalNode == null) return List.of();
+
+            LinkedList<BlockPos> path = new LinkedList<>();
+            Node n = goalNode;
+            while (n.parent != null) {
+                path.addFirst(n.pos);
+                n = n.parent;
+            }
+            return path;
+        }
+
+        /**
+         * Hedef blogun (buyu masasi, bileme tasi, spawner vb.) yaninda durulabilecek,
+         * oyuncunun mevcut konumuna en yakin bos noktayi bulur. Hedefin kendisi
+         * genelde katidir (spawner, masa vb.), bu yuzden direkt hedefe rota
+         * cizmek yerine yanindaki bos noktaya rota cizilir.
+         */
+        public static BlockPos findStandableNear(World world, BlockPos target, BlockPos preferFrom, int searchRadius) {
+            if (world == null) return null;
+            BlockPos best = null;
+            double bestDist = Double.MAX_VALUE;
+
+            for (int dx = -searchRadius; dx <= searchRadius; dx++) {
+                for (int dz = -searchRadius; dz <= searchRadius; dz++) {
+                    if (dx == 0 && dz == 0) continue;
+                    for (int dy = -1; dy <= 1; dy++) {
+                        BlockPos cand = target.add(dx, dy, dz);
+                        if (!isOpenColumn(world, cand)) continue;
+                        if (isHazard(world, cand) || isHazard(world, cand.up())) continue;
+                        if (!hasSupport(world, cand)) continue;
+
+                        double ddx = cand.getX() - preferFrom.getX();
+                        double ddy = cand.getY() - preferFrom.getY();
+                        double ddz = cand.getZ() - preferFrom.getZ();
+                        double d = ddx * ddx + ddy * ddy + ddz * ddz;
+                        if (d < bestDist) {
+                            bestDist = d;
+                            best = cand.toImmutable();
+                        }
+                    }
+                }
+            }
+            return best;
+        }
+
+        // =========================================================
+        // Blok kontrolleri
+        // =========================================================
+
+        /** Ayak seviyesi + bas seviyesi (2 blok) bos mu (oyuncu sigar mi)? */
+        private static boolean isOpenColumn(World world, BlockPos feet) {
+            return isPassable(world, feet) && isPassable(world, feet.up());
+        }
+
+        private static boolean isPassable(World world, BlockPos pos) {
+            BlockState state = world.getBlockState(pos);
+            if (state.isAir()) return true;
+            FluidState fluid = state.getFluidState();
+            if (!fluid.isEmpty()) return false; // su/lav: artik "gecilebilir" DEGIL, tamamen kacinilir
+            return state.getCollisionShape(world, pos).isEmpty();
+        }
+
+        private static boolean isHazard(World world, BlockPos pos) {
+            BlockState state = world.getBlockState(pos);
+            FluidState fluid = state.getFluidState();
+            if (!fluid.isEmpty()) return true; // su da lav da hazard: rota bu bloklara hic girmez
+            return state.isOf(net.minecraft.block.Blocks.FIRE) || state.isOf(net.minecraft.block.Blocks.LAVA) || state.isOf(net.minecraft.block.Blocks.MAGMA_BLOCK)
+                    || state.isOf(net.minecraft.block.Blocks.SOUL_FIRE) || state.isOf(net.minecraft.block.Blocks.CACTUS);
+        }
+
+        private static boolean hasSupport(World world, BlockPos feet) {
+            // Su/lav uzerinde "yuzerek" durmaya artik izin yok - sadece kati zemin gecerli.
+            return !world.getBlockState(feet.down()).getCollisionShape(world, feet.down()).isEmpty();
+        }
+
+        private static double heuristic(BlockPos a, BlockPos b) {
+            double dx = Math.abs(a.getX() - b.getX());
+            double dz = Math.abs(a.getZ() - b.getZ());
+            double dy = Math.abs(a.getY() - b.getY());
+            double diag = Math.min(dx, dz);
+            double straight = Math.max(dx, dz) - diag;
+            return diag * 1.4 + straight + dy * 0.5;
+        }
+
+        private static final class Node {
+            final BlockPos pos;
+            final double g;
+            final double f;
+            final Node parent;
+
+            Node(BlockPos pos, double g, double f, Node parent) {
+                this.pos = pos;
+                this.g = g;
+                this.f = f;
+                this.parent = parent;
+            }
+        }
+    }
+
 }
