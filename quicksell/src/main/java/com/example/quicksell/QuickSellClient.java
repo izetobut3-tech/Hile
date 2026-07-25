@@ -4,8 +4,6 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.ingame.EnchantingTableScreen;
-import net.minecraft.client.gui.screen.ingame.GrindstoneScreen;
 import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.option.KeyBinding;
@@ -67,6 +65,9 @@ public class QuickSellClient implements ClientModInitializer {
     private static final int REQUIRED_XP_LEVEL = 33;
     private static final int BLOCK_SEARCH_RADIUS = 24; // (2*24+1)^2 * 9 = ~21609 blok tariyor
     private static final double ARRIVE_DISTANCE = 2.3;
+    // Vanilla ekranlarda oyuncu envanteri hep sabit slotlardan baslar:
+    private static final int ENCHANT_PLAYER_INV_OFFSET = 2;   // 0=esya,1=lapis, 2'den itibaren envanter
+    private static final int GRINDSTONE_PLAYER_INV_OFFSET = 3; // 0,1=girdi,2=cikti, 3'ten itibaren envanter
 
     private static KeyBinding loopToggleKey; // G: dongu baslat/durdur
     private static KeyBinding stopKey;       // H: her ne olursa olsun hemen durdur
@@ -263,8 +264,8 @@ public class QuickSellClient implements ClientModInitializer {
     // =========================================================
 
     private void tickAtEnchantTable(MinecraftClient client, ClientPlayerEntity player) {
-        if (!(client.currentScreen instanceof EnchantingTableScreen)
-                || !(client.player.currentScreenHandler instanceof EnchantmentScreenHandler enchHandler)) {
+        if (!(client.currentScreen instanceof HandledScreen<?> handledScreen)
+                || !(handledScreen.getScreenHandler() instanceof EnchantmentScreenHandler enchHandler)) {
             tickCounter++;
             if (tickCounter > 60) {
                 player.sendMessage(Text.literal("[QuickSell] Buyu masasi acilmadi, toplamaya donuluyor.")
@@ -277,10 +278,10 @@ public class QuickSellClient implements ClientModInitializer {
         switch (subStep) {
             case 0 -> {
                 // Zirh parcasini slot 0'a, bir lapisi slot 1'e shift-click ile koy.
-                clickSlotShift(client, enchHandler, targetInventorySlot + enchHandler.getInventory().size());
+                clickSlotShift(client, enchHandler, targetInventorySlot + ENCHANT_PLAYER_INV_OFFSET);
                 int lapisSlot = findInventorySlotByPath(player, "lapis_lazuli");
                 if (lapisSlot != -1) {
-                    clickSlotShift(client, enchHandler, lapisSlot + enchHandler.getInventory().size());
+                    clickSlotShift(client, enchHandler, lapisSlot + ENCHANT_PLAYER_INV_OFFSET);
                 }
                 subStep = 1;
                 tickCounter = 0;
@@ -351,8 +352,8 @@ public class QuickSellClient implements ClientModInitializer {
     // =========================================================
 
     private void tickAtGrindstone(MinecraftClient client, ClientPlayerEntity player) {
-        if (!(client.currentScreen instanceof GrindstoneScreen)
-                || !(client.player.currentScreenHandler instanceof GrindstoneScreenHandler grindHandler)) {
+        if (!(client.currentScreen instanceof HandledScreen<?> handledScreen)
+                || !(handledScreen.getScreenHandler() instanceof GrindstoneScreenHandler grindHandler)) {
             tickCounter++;
             if (tickCounter > 60) {
                 player.sendMessage(Text.literal("[QuickSell] Bileme tasi acilmadi, toplamaya donuluyor.")
@@ -366,7 +367,7 @@ public class QuickSellClient implements ClientModInitializer {
             case 0 -> {
                 int slot = findArmorSlotNeedingProtection4(player);
                 if (slot == -1) slot = targetInventorySlot; // guvenlik icin yedek
-                clickSlotShift(client, grindHandler, slot + grindHandler.getInventory().size());
+                clickSlotShift(client, grindHandler, slot + GRINDSTONE_PLAYER_INV_OFFSET);
                 subStep = 1;
                 tickCounter = 0;
             }
@@ -517,7 +518,10 @@ public class QuickSellClient implements ClientModInitializer {
         double nearestDistSq = Double.MAX_VALUE;
         for (BlockPos pos : BlockPos.iterate(center.add(-radius, -4, -radius), center.add(radius, 4, radius))) {
             if (world.getBlockState(pos).isOf(block)) {
-                double d = pos.getSquaredDistance(player.getPos());
+                double ddx = pos.getX() + 0.5 - player.getX();
+                double ddy = pos.getY() + 0.5 - player.getY();
+                double ddz = pos.getZ() + 0.5 - player.getZ();
+                double d = ddx * ddx + ddy * ddy + ddz * ddz;
                 if (d < nearestDistSq) {
                     nearestDistSq = d;
                     nearest = pos.toImmutable();
