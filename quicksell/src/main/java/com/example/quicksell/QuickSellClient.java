@@ -160,15 +160,23 @@ public class QuickSellClient implements ClientModInitializer {
             return;
         }
 
+        // --- Kafa/govde yonunu (yaw) DEGISTIRMIYORUZ ---
+        // Karakter nereye bakiyorsa baksin; sadece hareket tuslariyla
+        // govde esyaya dogru "kayarak" (strafe) gidiyor.
         double dx = nearest.getX() - player.getX();
         double dz = nearest.getZ() - player.getZ();
-        float targetYaw = (float) (MathHelper.atan2(dz, dx) * (180.0 / Math.PI)) - 90f;
-        player.setYaw(smoothAngle(player.getYaw(), targetYaw, 12f));
-        player.setHeadYaw(player.getYaw());
+        float targetAngle = (float) (MathHelper.atan2(dz, dx) * (180.0 / Math.PI)) - 90f;
+        float diff = MathHelper.wrapDegrees(targetAngle - player.getYaw());
 
-        client.options.forwardKey.setPressed(true);
-        client.options.leftKey.setPressed(false);
-        client.options.rightKey.setPressed(false);
+        boolean moveBack = Math.abs(diff) > 100f;
+        boolean moveForward = !moveBack;
+        boolean moveRight = diff > 10f;
+        boolean moveLeft = diff < -10f;
+
+        client.options.forwardKey.setPressed(moveForward);
+        client.options.backKey.setPressed(moveBack);
+        client.options.leftKey.setPressed(moveLeft);
+        client.options.rightKey.setPressed(moveRight);
         client.options.sneakKey.setPressed(false);
 
         if (player.horizontalCollision) {
@@ -311,6 +319,7 @@ public class QuickSellClient implements ClientModInitializer {
 
     private void resetMovementKeys(MinecraftClient client) {
         client.options.forwardKey.setPressed(false);
+        client.options.backKey.setPressed(false);
         client.options.leftKey.setPressed(false);
         client.options.rightKey.setPressed(false);
         client.options.jumpKey.setPressed(false);
