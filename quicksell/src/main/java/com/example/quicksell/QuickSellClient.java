@@ -41,6 +41,10 @@ public class QuickSellClient implements ClientModInitializer {
     private int noItemTicks = 0;
     private int stuckTicks = 0;
     private int unstuckTicks = 0; // engelden kurtulmak icin gecici "geri git" sureci
+    private boolean unstuckMoveForward = false;
+    private boolean unstuckMoveBack = false;
+    private boolean unstuckMoveLeft = false;
+    private boolean unstuckMoveRight = false;
     private float lastHealth = -1f;
 
     private int clickIndex = 0;
@@ -163,14 +167,15 @@ public class QuickSellClient implements ClientModInitializer {
             return;
         }
 
-        // Bir engelden kurtulma surecindeysek: kisa sureligine geri git,
+        // Bir engelden kurtulma surecindeysek: carptigi anda hangi yone
+        // gidiyorduysa tam tersine giderek duvardan gercekten uzaklasir,
         // sonra otomatik olarak tekrar en yakin esyaya yonelecek.
         if (unstuckTicks > 0) {
             unstuckTicks--;
-            client.options.forwardKey.setPressed(false);
-            client.options.backKey.setPressed(true);
-            client.options.leftKey.setPressed(false);
-            client.options.rightKey.setPressed(false);
+            client.options.forwardKey.setPressed(unstuckMoveForward);
+            client.options.backKey.setPressed(unstuckMoveBack);
+            client.options.leftKey.setPressed(unstuckMoveLeft);
+            client.options.rightKey.setPressed(unstuckMoveRight);
             client.options.jumpKey.setPressed(true);
             client.options.sneakKey.setPressed(false);
             return;
@@ -199,9 +204,14 @@ public class QuickSellClient implements ClientModInitializer {
             stuckTicks++;
             client.options.jumpKey.setPressed(true);
             if (stuckTicks > 20) {
-                // Artik dongu durmuyor: kisa bir sure geri gidip tekrar deneyecek.
+                // Artik dongu durmuyor: carpma anindaki yonun tam tersine
+                // gidip duvardan gercekten uzaklasacak, sonra tekrar deneyecek.
                 stuckTicks = 0;
                 unstuckTicks = 12; // ~0.6 saniye geri git
+                unstuckMoveForward = moveBack;
+                unstuckMoveBack = moveForward;
+                unstuckMoveLeft = moveRight;
+                unstuckMoveRight = moveLeft;
             }
         } else {
             stuckTicks = 0;
