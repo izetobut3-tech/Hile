@@ -1,0 +1,36 @@
+
+> Configure project :
+Fabric Loom: 1.14.10
+
+> Task :compileJava FAILED
+/workspaces/Hile/quicksell/src/main/java/com/example/quicksell/QuickSellClient.java:52: error: incompatible types: String cannot be converted to Category
+                "key.quicksell.loop", GLFW.GLFW_KEY_G, "category.quicksell"));
+                                                       ^
+/workspaces/Hile/quicksell/src/main/java/com/example/quicksell/QuickSellClient.java:55: error: incompatible types: String cannot be converted to Category
+                "key.quicksell.stop", GLFW.GLFW_KEY_H, "category.quicksell"));
+                                                       ^
+Note: Some messages have been simplified; recompile with -Xdiags:verbose to get full output
+2 errors
+
+[Incubating] Problems report is available at: file:///workspaces/Hile/quicksell/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileJava'.
+> Compilation failed; see the compiler output below.
+  /workspaces/Hile/quicksell/src/main/java/com/example/quicksell/QuickSellClient.java:52: error: incompatible types: String cannot be converted to Category
+                  "key.quicksell.loop", GLFW.GLFW_KEY_G, "category.quicksell"));
+                                                         ^
+  /workspaces/Hile/quicksell/src/main/java/com/example/quicksell/QuickSellClient.java:55: error: incompatible types: String cannot be converted to Category
+                  "key.quicksell.stop", GLFW.GLFW_KEY_H, "category.quicksell"));
+                                                         ^
+  Note: Some messages have been simplified; recompile with -Xdiags:verbose to get full output
+  2 errors
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 3s
+1 actionable task: 1 executed
