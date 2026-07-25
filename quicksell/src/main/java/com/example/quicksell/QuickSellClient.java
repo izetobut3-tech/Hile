@@ -96,6 +96,7 @@ public class QuickSellClient implements ClientModInitializer {
 
     private BlockPos cachedTargetBlock = null;
     private int targetInventorySlot = -1;
+    private int lastInsufficientXpLevel = -1; // ayni seviyede tekrar tekrar denemeyi engeller
 
     @Override
     public void onInitializeClient() {
@@ -126,6 +127,7 @@ public class QuickSellClient implements ClientModInitializer {
                 stopEverything(client, "Dongu kapatildi.");
             } else {
                 loopActive = true;
+                lastInsufficientXpLevel = -1;
                 lastHealth = player.getHealth();
                 stuckTicks = 0;
                 unstuckTicks = 0;
@@ -175,7 +177,7 @@ public class QuickSellClient implements ClientModInitializer {
         }
 
         // XP esigine ulastik mi? Ulastiysak ve eksik P4 parca varsa buyu masasina git.
-        if (player.experienceLevel >= REQUIRED_XP_LEVEL) {
+        if (player.experienceLevel >= REQUIRED_XP_LEVEL && player.experienceLevel > lastInsufficientXpLevel) {
             int slot = findArmorSlotNeedingProtection4(player);
             if (slot != -1) {
                 targetInventorySlot = slot;
@@ -278,10 +280,10 @@ public class QuickSellClient implements ClientModInitializer {
         switch (subStep) {
             case 0 -> {
                 // Zirh parcasini slot 0'a, bir lapisi slot 1'e shift-click ile koy.
-                clickSlotShift(client, enchHandler, targetInventorySlot + ENCHANT_PLAYER_INV_OFFSET);
+                clickSlotShift(client, enchHandler, toHandlerSlot(ENCHANT_PLAYER_INV_OFFSET, targetInventorySlot));
                 int lapisSlot = findInventorySlotByPath(player, "lapis_lazuli");
                 if (lapisSlot != -1) {
-                    clickSlotShift(client, enchHandler, lapisSlot + ENCHANT_PLAYER_INV_OFFSET);
+                    clickSlotShift(client, enchHandler, toHandlerSlot(ENCHANT_PLAYER_INV_OFFSET, lapisSlot));
                 }
                 subStep = 1;
                 tickCounter = 0;
@@ -300,7 +302,8 @@ public class QuickSellClient implements ClientModInitializer {
                 }
 
                 if (chosen == -1) {
-                    // XP yetmiyor: parcayi geri al, toplamaya (xp biriktirmeye) don.
+                    // Parcayi geri al, toplamaya (xp biriktirmeye) don.
+                    lastInsufficientXpLevel = player.experienceLevel;
                     clickSlotShift(client, enchHandler, 0);
                     client.player.closeHandledScreen();
                     client.setScreen(null);
@@ -329,6 +332,7 @@ public class QuickSellClient implements ClientModInitializer {
                 if (protLevel >= 4) {
                     player.sendMessage(Text.literal("[QuickSell] Koruma IV basarili! Toplamaya devam.")
                             .formatted(Formatting.GREEN), false);
+                    lastInsufficientXpLevel = -1;
                     state = State.COLLECTING;
                 } else {
                     cachedTargetBlock = findNearestBlock(client, player, net.minecraft.block.Blocks.GRINDSTONE, BLOCK_SEARCH_RADIUS);
@@ -367,7 +371,7 @@ public class QuickSellClient implements ClientModInitializer {
             case 0 -> {
                 int slot = findArmorSlotNeedingProtection4(player);
                 if (slot == -1) slot = targetInventorySlot; // guvenlik icin yedek
-                clickSlotShift(client, grindHandler, slot + GRINDSTONE_PLAYER_INV_OFFSET);
+                clickSlotShift(client, grindHandler, toHandlerSlot(GRINDSTONE_PLAYER_INV_OFFSET, slot));
                 subStep = 1;
                 tickCounter = 0;
             }
@@ -455,6 +459,20 @@ public class QuickSellClient implements ClientModInitializer {
 
     private void clickSlotShift(MinecraftClient client, ScreenHandler handler, int slotId) {
         client.interactionManager.clickSlot(handler.syncId, slotId, 0, SlotActionType.QUICK_MOVE, client.player);
+    }
+
+    /**
+     * PlayerInventory index (0-35, burada 0-8 hotbar, 9-35 ana depo) ile
+     * ekrandaki (screen handler) slot numarasi AYNI SIRADA DEGIL: vanilla
+     * ekranlarda once ana depo (9-35), sonra hotbar (0-8) sirayla eklenir.
+     * Bu yuzden dogrudan "base + invIndex" yapmak yanlis slota tiklar.
+     */
+    private int toHandlerSlot(int base, int invIndex) {
+        if (invIndex >= 9) {
+            return base + (invIndex - 9);
+        } else {
+            return base + 27 + invIndex;
+        }
     }
 
     private int findInventorySlotByPath(ClientPlayerEntity player, String path) {
