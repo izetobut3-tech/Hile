@@ -76,6 +76,10 @@ public class QuickSellClient implements ClientModInitializer {
     // Spawner taramasi ~848bin blok kontrolu gerektirebilir (100 blok yaricap x 21 kat).
     // Bu yuzden her tick degil, sadece belirli araliklarla (tick bazinda) taraniyor.
     private static final int SPAWNER_RESCAN_TICKS = 100; // ~5 saniye (20 tick/saniye)
+    // Spawnera giderken duvar/engel yuzunden tam mesafeye inilemiyorsa, sonsuza kadar
+    // takilip "mimik" (jump+geri git) yapmasin diye bu kadar tick sonra pes edip
+    // "yeterince yaklastim" sayilir ve direkt XP toplamaya gecilir.
+    private static final int SPAWNER_STUCK_GIVEUP_TICKS = 100; // ~5 saniye
     // Vanilla ekranlarda oyuncu envanteri hep sabit slotlardan baslar:
     private static final int ENCHANT_PLAYER_INV_OFFSET = 2;   // 0=esya,1=lapis, 2'den itibaren envanter
     private static final int GRINDSTONE_PLAYER_INV_OFFSET = 3; // 0,1=girdi,2=cikti, 3'ten itibaren envanter
@@ -112,6 +116,11 @@ public class QuickSellClient implements ClientModInitializer {
     // Spawner cache: pahali blok taramasini her tick yapmamak icin.
     private BlockPos cachedSpawnerBlock = null;
     private int spawnerRescanCounter = 0;
+    // true olunca: spawner'a "yeterince" yaklasildi demektir, artik spawner takibi
+    // tamamen kapanir ve saf XP toplama moduna gecilir (yeniden buyu/bileme donusune
+    // kadar spawner hic hesaba katilmaz).
+    private boolean spawnerReached = false;
+    private int spawnerStuckTicks = 0;
 
     @Override
     public void onInitializeClient() {
@@ -148,8 +157,7 @@ public class QuickSellClient implements ClientModInitializer {
                 lastHealth = player.getHealth();
                 stuckTicks = 0;
                 unstuckTicks = 0;
-                cachedSpawnerBlock = null;
-                spawnerRescanCounter = 0; // dongu basladiginda hemen bir kere tara
+                resumeSpawnerHunt(); // dongu basladiginda hemen 100 blok taranip spawnera gidilsin
                 state = State.COLLECTING;
                 player.sendMessage(Text.literal("[QuickSell] Dongu BASLADI: topla -> xp 33'te buyule -> P4 olana kadar devam")
                         .formatted(Formatting.GREEN), false);
@@ -216,9 +224,6 @@ public class QuickSellClient implements ClientModInitializer {
             }
         }
 
-        // ---- Spawner cache guncelleme (agir tarama, sadece birkac saniyede bir) ----
-        updateSpawnerCache(client, player, world);
-
         double radius = BLOCK_SEARCH_RADIUS; // artik esya toplama config'i degil, ayni 100 blokluk menzil
 
         // Sadece yerdeki XP toplarini hedef al (esya toplama kaldirildi).
@@ -237,6 +242,28 @@ public class QuickSellClient implements ClientModInitializer {
                 foundOrb = true;
             }
         }
+
+        // ---- SPAWNER'A ULASILDIYSA: spawner takibi tamamen kapali, sadece XP topla. ----
+        // Bu sayede spawnerin yaninda dururken her tick spawner-mesafesi ile
+        // yeniden kiyaslama yapilmiyor (eskiden bu, XP toplanmamasina ve spawner
+        // engelliyse takilip "mimik" hareketlere sebep oluyordu).
+        if (spawnerReached) {
+            if (!foundOrb) {
+                resetMovementKeys(client);
+                unstuckTicks = 0;
+                return;
+            }
+            BlockPos targetGroundCheck = BlockPos.ofFloored(orbX, orbY - 1, orbZ);
+            if (world.getBlockState(targetGroundCheck).isAir()
+                    && world.getBlockState(targetGroundCheck.down()).isAir()) {
+                return;
+            }
+            moveTowardsPosition(client, player, orbX, orbZ, 0.6);
+            return;
+        }
+
+        // ---- SPAWNERA HENUZ ULASILMADI: spawner cache guncelle + spawnera ilerle. ----
+        updateSpawnerCache(client, player, world);
 
         // Spawner mesafesi (XP topuyla adil kiyaslama icin tam 3D: X/Y/Z, blok merkezine gore).
         boolean foundSpawner = cachedSpawnerBlock != null;
@@ -259,6 +286,7 @@ public class QuickSellClient implements ClientModInitializer {
         boolean goToOrb = foundOrb && (!foundSpawner || nearestOrbDistSq <= nearestSpawnerDistSq);
 
         if (goToOrb) {
+            spawnerStuckTicks = 0;
             BlockPos targetGroundCheck = BlockPos.ofFloored(orbX, orbY - 1, orbZ);
             if (world.getBlockState(targetGroundCheck).isAir()
                     && world.getBlockState(targetGroundCheck.down()).isAir()) {
@@ -268,10 +296,23 @@ public class QuickSellClient implements ClientModInitializer {
         } else {
             double sx = cachedSpawnerBlock.getX() + 0.5;
             double sz = cachedSpawnerBlock.getZ() + 0.5;
-            // arrived == true donerse zaten hareket tuslari sifirlanir ve
-            // moblarin dogup XP topu birakmasi beklenir; bir sonraki tick'te
-            // XP topu bulunursa yukaridaki mantik otomatik ona gecer.
-            moveTowardsPosition(client, player, sx, sz, SPAWNER_ARRIVE_DISTANCE);
+            boolean arrivedAtSpawner = moveTowardsPosition(client, player, sx, sz, SPAWNER_ARRIVE_DISTANCE);
+            if (arrivedAtSpawner) {
+                spawnerReached = true;
+                spawnerStuckTicks = 0;
+                resetMovementKeys(client);
+            } else if (player.horizontalCollision) {
+                spawnerStuckTicks++;
+                if (spawnerStuckTicks > SPAWNER_STUCK_GIVEUP_TICKS) {
+                    // Duvar/engel yuzunden tam mesafeye inilemiyor: pes edip
+                    // "yeterince yakinim" say, sonsuz takilma/mimik hareketi engelle.
+                    spawnerReached = true;
+                    spawnerStuckTicks = 0;
+                    resetMovementKeys(client);
+                }
+            } else {
+                spawnerStuckTicks = 0;
+            }
         }
     }
 
@@ -294,6 +335,14 @@ public class QuickSellClient implements ClientModInitializer {
         }
     }
 
+    /** XP 33'e ulasip buyu/bileme donusu bittiginde tekrar spawner aramaya baslamak icin cagrilir. */
+    private void resumeSpawnerHunt() {
+        spawnerReached = false;
+        cachedSpawnerBlock = null;
+        spawnerRescanCounter = 0; // bir sonraki tickCollecting'de hemen tam tarama yapilsin
+        spawnerStuckTicks = 0;
+    }
+
     // =========================================================
     // BIR BLOGA GITME (buyu masasi / bileme tasi ortak fonksiyonu)
     // =========================================================
@@ -306,6 +355,7 @@ public class QuickSellClient implements ClientModInitializer {
                 player.sendMessage(Text.literal("[QuickSell] Hedef blok bulunamadi, toplamaya donuluyor.")
                         .formatted(Formatting.YELLOW), false);
                 resetMovementKeys(client);
+                resumeSpawnerHunt();
                 state = State.COLLECTING;
                 return;
             }
@@ -335,6 +385,7 @@ public class QuickSellClient implements ClientModInitializer {
             if (tickCounter > 60) {
                 player.sendMessage(Text.literal("[QuickSell] Buyu masasi acilmadi, toplamaya donuluyor.")
                         .formatted(Formatting.YELLOW), false);
+                resumeSpawnerHunt();
                 state = State.COLLECTING;
             }
             return;
@@ -372,6 +423,7 @@ public class QuickSellClient implements ClientModInitializer {
                     client.setScreen(null);
                     player.sendMessage(Text.literal("[QuickSell] XP yetersiz, toplamaya donuluyor.")
                             .formatted(Formatting.YELLOW), false);
+                    resumeSpawnerHunt();
                     state = State.COLLECTING;
                     return;
                 }
@@ -396,12 +448,14 @@ public class QuickSellClient implements ClientModInitializer {
                     player.sendMessage(Text.literal("[QuickSell] Koruma IV basarili! Toplamaya devam.")
                             .formatted(Formatting.GREEN), false);
                     lastInsufficientXpLevel = -1;
+                    resumeSpawnerHunt();
                     state = State.COLLECTING;
                 } else {
                     cachedTargetBlock = findNearestBlock(client, player, net.minecraft.block.Blocks.GRINDSTONE, BLOCK_SEARCH_RADIUS);
                     if (cachedTargetBlock == null) {
                         player.sendMessage(Text.literal("[QuickSell] Bileme tasi bulunamadi, toplamaya donuluyor.")
                                 .formatted(Formatting.YELLOW), false);
+                        resumeSpawnerHunt();
                         state = State.COLLECTING;
                     } else {
                         player.sendMessage(Text.literal("[QuickSell] P4 gelmedi, bileme tasina gidiliyor.")
@@ -425,6 +479,7 @@ public class QuickSellClient implements ClientModInitializer {
             if (tickCounter > 60) {
                 player.sendMessage(Text.literal("[QuickSell] Bileme tasi acilmadi, toplamaya donuluyor.")
                         .formatted(Formatting.YELLOW), false);
+                resumeSpawnerHunt();
                 state = State.COLLECTING;
             }
             return;
@@ -450,6 +505,7 @@ public class QuickSellClient implements ClientModInitializer {
                 if (cachedTargetBlock == null) {
                     player.sendMessage(Text.literal("[QuickSell] Buyu masasi bulunamadi, toplamaya donuluyor.")
                             .formatted(Formatting.YELLOW), false);
+                    resumeSpawnerHunt();
                     state = State.COLLECTING;
                 } else {
                     state = State.GOTO_ENCHANT_TABLE;
