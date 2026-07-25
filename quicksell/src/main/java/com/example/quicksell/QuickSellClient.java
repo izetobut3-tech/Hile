@@ -40,6 +40,7 @@ public class QuickSellClient implements ClientModInitializer {
     private int tickCounter = 0;
     private int noItemTicks = 0;
     private int stuckTicks = 0;
+    private int unstuckTicks = 0; // engelden kurtulmak icin gecici "geri git" sureci
     private float lastHealth = -1f;
 
     private int clickIndex = 0;
@@ -77,6 +78,7 @@ public class QuickSellClient implements ClientModInitializer {
                 lastHealth = player.getHealth();
                 noItemTicks = 0;
                 stuckTicks = 0;
+                unstuckTicks = 0;
                 state = State.COLLECTING;
                 player.sendMessage(Text.literal("[QuickSell] Dongu BASLADI: topla -> envanter dolunca sat -> tekrarla")
                         .formatted(Formatting.GREEN), false);
@@ -146,6 +148,7 @@ public class QuickSellClient implements ClientModInitializer {
 
         if (nearest == null) {
             resetMovementKeys(client);
+            unstuckTicks = 0;
             noItemTicks++;
             if (noItemTicks > QuickSellConfig.get().noItemTimeoutTicks && hasAnySellableItem(player)) {
                 beginSell(client, player);
@@ -157,6 +160,19 @@ public class QuickSellClient implements ClientModInitializer {
         BlockPos targetGroundCheck = BlockPos.ofFloored(nearest.getX(), nearest.getY() - 1, nearest.getZ());
         if (world.getBlockState(targetGroundCheck).isAir()
                 && world.getBlockState(targetGroundCheck.down()).isAir()) {
+            return;
+        }
+
+        // Bir engelden kurtulma surecindeysek: kisa sureligine geri git,
+        // sonra otomatik olarak tekrar en yakin esyaya yonelecek.
+        if (unstuckTicks > 0) {
+            unstuckTicks--;
+            client.options.forwardKey.setPressed(false);
+            client.options.backKey.setPressed(true);
+            client.options.leftKey.setPressed(false);
+            client.options.rightKey.setPressed(false);
+            client.options.jumpKey.setPressed(true);
+            client.options.sneakKey.setPressed(false);
             return;
         }
 
@@ -182,9 +198,10 @@ public class QuickSellClient implements ClientModInitializer {
         if (player.horizontalCollision) {
             stuckTicks++;
             client.options.jumpKey.setPressed(true);
-            if (stuckTicks > 60) {
-                stopEverything(client, "Bir engelde takildim, dongu durduruldu.");
-                return;
+            if (stuckTicks > 20) {
+                // Artik dongu durmuyor: kisa bir sure geri gidip tekrar deneyecek.
+                stuckTicks = 0;
+                unstuckTicks = 12; // ~0.6 saniye geri git
             }
         } else {
             stuckTicks = 0;
@@ -306,6 +323,7 @@ public class QuickSellClient implements ClientModInitializer {
         if (loopActive) {
             noItemTicks = 0;
             stuckTicks = 0;
+            unstuckTicks = 0;
             lastHealth = client.player != null ? client.player.getHealth() : -1f;
             state = State.COLLECTING;
         } else {
