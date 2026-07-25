@@ -118,6 +118,8 @@ public class QuickSellClient implements ClientModInitializer {
             return;
         }
 
+        tickAutoEat(client, player);
+
         while (stopKey.wasPressed()) {
             stopEverything(client, "Elle durduruldu.");
         }
@@ -197,7 +199,7 @@ public class QuickSellClient implements ClientModInitializer {
             }
         }
 
-        double radius = QuickSellConfig.get().collectRadius;
+        double radius = BLOCK_SEARCH_RADIUS; // artik esya toplama config'i degil, ayni 100 blokluk menzil
 
         double nearestDistSq = Double.MAX_VALUE;
         double nearestX = 0, nearestZ = 0, nearestY = 0;
@@ -456,6 +458,22 @@ public class QuickSellClient implements ClientModInitializer {
     // =========================================================
     // YARDIMCI - envanter / esya kontrolleri
     // =========================================================
+
+    private static final int HUNGER_EAT_THRESHOLD = 14; // 10 ikondan 3'u eksilince (7 ikon = 14/20)
+
+    /** Aclik 3 kare (17/20 ve alti) dusunce sol eldeki (offhand) yiyecegi otomatik yer. */
+    private void tickAutoEat(MinecraftClient client, ClientPlayerEntity player) {
+        if (player.isUsingItem()) return; // zaten bir sey yiyor/kullaniyor, tekrar tetikleme
+
+        int food = player.getHungerManager().getFoodLevel();
+        if (food > HUNGER_EAT_THRESHOLD) return;
+
+        ItemStack offhand = player.getOffHandStack();
+        if (offhand.isEmpty()) return;
+        if (offhand.get(DataComponentTypes.FOOD) == null) return; // yiyecek degilse dokunma
+
+        client.interactionManager.interactItem(player, Hand.OFF_HAND);
+    }
 
     private void clickSlotShift(MinecraftClient client, ScreenHandler handler, int slotId) {
         client.interactionManager.clickSlot(handler.syncId, slotId, 0, SlotActionType.QUICK_MOVE, client.player);
