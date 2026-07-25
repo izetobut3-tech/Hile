@@ -40,6 +40,11 @@ import java.util.List;
  *
  * Yeni gorev:
  *  1) Etraftaki (config'de belirtilen) esyalari ve yerdeki XP toplarini topla.
+ *     Ayni 100 blokluk menzil icinde spawner (mob kafesi) varsa, XP topu ile
+ *     spawner'dan hangisi daha yakinsa ona gidilir. Spawner'a varilinca
+ *     normal XP toplama mekanizmasi (bu ayni COLLECTING fazi) calismaya
+ *     devam eder; spawnerdan cikan moblarin XP toplari yine en yakin hedef
+ *     olarak degerlendirilir.
  *     Kafa/kamera (yaw) HIC donmuyor, sadece govde W/A/S/D kombinasyonuyla
  *     hedefe dogru "kayarak" gidiyor.
  *  2) XP seviyesi 33'e ulasinca: envanterdeki 4 zirh parcasindan (kask,
@@ -65,6 +70,12 @@ public class QuickSellClient implements ClientModInitializer {
     private static final int REQUIRED_XP_LEVEL = 33;
     private static final int BLOCK_SEARCH_RADIUS = 100; // yatay 100 blok
     private static final double ARRIVE_DISTANCE = 2.3;
+    // Spawner tarafina varinca cok yakina sokulmaya gerek yok (moblar orada dogacak),
+    // hem cakisip sikismayi hem de mobun ustune dusmeyi engellemek icin biraz mesafe birak.
+    private static final double SPAWNER_ARRIVE_DISTANCE = 5.0;
+    // Spawner taramasi ~848bin blok kontrolu gerektirebilir (100 blok yaricap x 21 kat).
+    // Bu yuzden her tick degil, sadece belirli araliklarla (tick bazinda) taraniyor.
+    private static final int SPAWNER_RESCAN_TICKS = 100; // ~5 saniye (20 tick/saniye)
     // Vanilla ekranlarda oyuncu envanteri hep sabit slotlardan baslar:
     private static final int ENCHANT_PLAYER_INV_OFFSET = 2;   // 0=esya,1=lapis, 2'den itibaren envanter
     private static final int GRINDSTONE_PLAYER_INV_OFFSET = 3; // 0,1=girdi,2=cikti, 3'ten itibaren envanter
@@ -97,6 +108,10 @@ public class QuickSellClient implements ClientModInitializer {
     private BlockPos cachedTargetBlock = null;
     private int targetInventorySlot = -1;
     private int lastInsufficientXpLevel = -1; // ayni seviyede tekrar tekrar denemeyi engeller
+
+    // Spawner cache: pahali blok taramasini her tick yapmamak icin.
+    private BlockPos cachedSpawnerBlock = null;
+    private int spawnerRescanCounter = 0;
 
     @Override
     public void onInitializeClient() {
@@ -133,6 +148,8 @@ public class QuickSellClient implements ClientModInitializer {
                 lastHealth = player.getHealth();
                 stuckTicks = 0;
                 unstuckTicks = 0;
+                cachedSpawnerBlock = null;
+                spawnerRescanCounter = 0; // dongu basladiginda hemen bir kere tara
                 state = State.COLLECTING;
                 player.sendMessage(Text.literal("[QuickSell] Dongu BASLADI: topla -> xp 33'te buyule -> P4 olana kadar devam")
                         .formatted(Formatting.GREEN), false);
@@ -154,7 +171,7 @@ public class QuickSellClient implements ClientModInitializer {
     }
 
     // =========================================================
-    // TOPLAMA FAZI (esya + xp toplari)
+    // TOPLAMA FAZI (xp toplari + spawner arama)
     // =========================================================
 
     private void tickCollecting(MinecraftClient client, ClientPlayerEntity player) {
@@ -199,38 +216,82 @@ public class QuickSellClient implements ClientModInitializer {
             }
         }
 
+        // ---- Spawner cache guncelleme (agir tarama, sadece birkac saniyede bir) ----
+        updateSpawnerCache(client, player, world);
+
         double radius = BLOCK_SEARCH_RADIUS; // artik esya toplama config'i degil, ayni 100 blokluk menzil
 
-        double nearestDistSq = Double.MAX_VALUE;
-        double nearestX = 0, nearestZ = 0, nearestY = 0;
-        boolean foundTarget = false;
-
         // Sadece yerdeki XP toplarini hedef al (esya toplama kaldirildi).
+        double nearestOrbDistSq = Double.MAX_VALUE;
+        double orbX = 0, orbY = 0, orbZ = 0;
+        boolean foundOrb = false;
+
         for (var orb : world.getEntitiesByClass(ExperienceOrbEntity.class,
                 player.getBoundingBox().expand(radius), e -> true)) {
             double distSq = orb.squaredDistanceTo(player);
-            if (distSq < nearestDistSq) {
-                nearestDistSq = distSq;
-                nearestX = orb.getX();
-                nearestY = orb.getY();
-                nearestZ = orb.getZ();
-                foundTarget = true;
+            if (distSq < nearestOrbDistSq) {
+                nearestOrbDistSq = distSq;
+                orbX = orb.getX();
+                orbY = orb.getY();
+                orbZ = orb.getZ();
+                foundOrb = true;
             }
         }
 
-        if (!foundTarget) {
+        // Spawner mesafesi (XP topuyla adil kiyaslama icin tam 3D: X/Y/Z, blok merkezine gore).
+        boolean foundSpawner = cachedSpawnerBlock != null;
+        double nearestSpawnerDistSq = Double.MAX_VALUE;
+        if (foundSpawner) {
+            double sdx = (cachedSpawnerBlock.getX() + 0.5) - player.getX();
+            double sdy = (cachedSpawnerBlock.getY() + 0.5) - player.getY();
+            double sdz = (cachedSpawnerBlock.getZ() + 0.5) - player.getZ();
+            nearestSpawnerDistSq = sdx * sdx + sdy * sdy + sdz * sdz;
+        }
+
+        if (!foundOrb && !foundSpawner) {
             resetMovementKeys(client);
             unstuckTicks = 0;
             return;
         }
 
-        BlockPos targetGroundCheck = BlockPos.ofFloored(nearestX, nearestY - 1, nearestZ);
-        if (world.getBlockState(targetGroundCheck).isAir()
-                && world.getBlockState(targetGroundCheck.down()).isAir()) {
-            return;
+        // Iki hedeften hangisi daha yakinsa ona git. XP topu varsa ve spawnerdan
+        // yakinsa (ya da spawner yoksa) direkt topu topla; degilse spawnera git.
+        boolean goToOrb = foundOrb && (!foundSpawner || nearestOrbDistSq <= nearestSpawnerDistSq);
+
+        if (goToOrb) {
+            BlockPos targetGroundCheck = BlockPos.ofFloored(orbX, orbY - 1, orbZ);
+            if (world.getBlockState(targetGroundCheck).isAir()
+                    && world.getBlockState(targetGroundCheck.down()).isAir()) {
+                return;
+            }
+            moveTowardsPosition(client, player, orbX, orbZ, 0.6);
+        } else {
+            double sx = cachedSpawnerBlock.getX() + 0.5;
+            double sz = cachedSpawnerBlock.getZ() + 0.5;
+            // arrived == true donerse zaten hareket tuslari sifirlanir ve
+            // moblarin dogup XP topu birakmasi beklenir; bir sonraki tick'te
+            // XP topu bulunursa yukaridaki mantik otomatik ona gecer.
+            moveTowardsPosition(client, player, sx, sz, SPAWNER_ARRIVE_DISTANCE);
+        }
+    }
+
+    /**
+     * Spawner konumunu cache'ler. Pahali blok taramasi (100 blok yaricap) sadece
+     * SPAWNER_RESCAN_TICKS'te bir yapilir. Aradaki tick'lerde sadece cache'lenen
+     * pozisyonun hala spawner olup olmadigi (tek blok) kontrol edilir - bu ucuzdur.
+     */
+    private void updateSpawnerCache(MinecraftClient client, ClientPlayerEntity player, net.minecraft.world.World world) {
+        if (cachedSpawnerBlock != null && !world.getBlockState(cachedSpawnerBlock).isOf(net.minecraft.block.Blocks.SPAWNER)) {
+            // Spawner kirilmis/degismis olabilir, cache'i hemen bosalt.
+            cachedSpawnerBlock = null;
         }
 
-        moveTowardsPosition(client, player, nearestX, nearestZ, 0.6);
+        spawnerRescanCounter--;
+        if (spawnerRescanCounter <= 0) {
+            spawnerRescanCounter = SPAWNER_RESCAN_TICKS;
+            BlockPos found = findNearestBlock(client, player, net.minecraft.block.Blocks.SPAWNER, BLOCK_SEARCH_RADIUS);
+            cachedSpawnerBlock = found; // yeni tarama sonucu (null olabilir) her zaman gecerli
+        }
     }
 
     // =========================================================
